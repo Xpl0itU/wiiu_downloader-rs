@@ -9,6 +9,12 @@ reqwest = { version = "0.11.16", features = ["stream"] }
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3.14"
 indicatif = "0.15.0"
+aes = "0.8.2"
+cbc = "0.1.2"
+md5 = "0.7.0"
+sha1 = "0.10.5"
+openssl = "0.10.49"
+hex = "*"
 
 [[bin]]
 name = "wiiu_downloader-rs"
