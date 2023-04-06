@@ -1,0 +1,15 @@
+[package]
+name = "wiiu_downloader-rs"
+version = "1.32.0"
+authors = ["Xpl0itU"]
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.11.16", features = ["stream"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3.14"
+indicatif = "0.15.0"
+
+[[bin]]
+name = "wiiu_downloader-rs"
+path = "src/main.rs"
