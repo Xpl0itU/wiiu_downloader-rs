@@ -1,15 +1,13 @@
 mod keygen;
-mod progress_dialog;
 
-use progress_dialog::Progress;
-use gtk::{prelude::*, ProgressBar, Label, Application};
+use gtk::prelude::*;
+use gtk::{Application, ApplicationWindow, Box, Button, ProgressBar, Label, glib};
+use futures::StreamExt;
+
+use std::fs::File;
 
 use std::io::Read;
 use std::io::Seek;
-use std::io::Cursor;
-
-use reqwest::Url;
-use std::fs::File;
 use std::io::Write;
 
 use keygen::generate_key;
@@ -63,40 +61,86 @@ fn create_ticket(title_id: &str, title_key: &str, title_version: u16, output_pat
     }
 }
 
-fn download_file(url: &Url, path: &str, progress: &Progress) -> Result<(), reqwest::Error> {
-    let mut response = reqwest::blocking::get(url.as_str())?;
-    let content_length = response.content_length().unwrap_or(0);
-    let mut downloaded = 0;
-    let mut writer = Cursor::new(Vec::new());
+fn progress_dialog() {
+    let app = Application::new(
+        Some("com.example.progress-dialog"),
+        Default::default(),
+    );
+    
+    app.connect_activate(|app| {
+        let window = ApplicationWindow::new(app);
+        window.set_title(Some("Download Progress"));
+        window.set_default_size(400, 100);
 
-    loop {
-        let mut buffer = [0; 1024];
-        let bytes_read = response.read(&mut buffer).unwrap();
+        let box_container = Box::new(gtk::Orientation::Vertical, 10);
 
-        if bytes_read == 0 {
-            break;
-        }
+        let progress_bar = ProgressBar::new();
+        progress_bar.set_fraction(0.0);
+        box_container.append(&progress_bar);
 
-        downloaded += bytes_read as u64;
-        update_progress(downloaded, content_length, progress);
+        let label = Label::new(Some("0%"));
+        box_container.append(&label);
 
-        writer.write_all(&buffer[..bytes_read]).unwrap();
-    }
+        let button = Button::builder()
+            .label("Download")
+            .build();
+        let progress_bar_clone = progress_bar.clone();
+        let label_clone = label.clone();
+        button.connect_clicked(move |_| {
+            download_title("00050000101c9500", "BOTW EUR", &progress_bar_clone, &label_clone).unwrap();
+        });
+        box_container.append(&button);
 
-    let mut file = File::create(path).unwrap();
-    file.write_all(&writer.into_inner()).unwrap();
+        window.set_child(Some(&box_container));
+        window.show();
+    });
 
-    Ok(())
+    app.run();
 }
 
-pub fn download_title(title_id: &str, name: &str, progress: &progress_dialog::Progress) -> std::io::Result<()> {
+async fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label: &Label) -> Result<(), String> {
+    // Reqwest setup
+    let res = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .or(Err(format!("Failed to GET from '{}'", &url)))?;
+    let total_size = res
+        .content_length()
+        .ok_or(format!("Failed to get content length from '{}'", &url))?;
+
+    // download chunks
+    let mut file = std::fs::File::create(path).or(Err(format!("Failed to create file '{}'", path)))?;
+    let mut downloaded: u64 = 0;
+    let mut stream = res.bytes_stream();
+
+    while let Some(item) = stream.next().await {
+        let chunk = item.or(Err(format!("Error while downloading file")))?;
+        downloaded += chunk.len() as u64;
+        let progress = downloaded as f64 / total_size as f64;
+        progress_bar.set_fraction(progress);
+
+        let percentage = progress * 100.0;
+        let percentage_string = format!("{:.0}%", percentage);
+        label.set_text(&percentage_string);
+        while glib::MainContext::pending(&glib::MainContext::default()) {
+            glib::MainContext::iteration(&glib::MainContext::default(), true);
+        }
+        file.write_all(&chunk)
+            .or(Err(format!("Error while writing to file")))?;
+    }
+
+    return Ok(());
+}
+
+pub fn download_title(title_id: &str, name: &str, progress_bar: &ProgressBar, label: &Label) -> std::io::Result<()> {
     if !path_exists(name) {
         std::fs::create_dir(name).unwrap();
     }
 
     let base_url = format!("http://ccs.cdn.c.shop.nintendowifi.net/ccs/download/{}", title_id);
 
-    download_file( &Url::parse(&format!("{}/{}", base_url, "tmd")).unwrap(), &format!("{}/title.tmd", name), &progress).unwrap();
+    futures::executor::block_on(download_file(&format!("{}/{}", base_url, "tmd"), &format!("{}/title.tmd", name), progress_bar, label)).unwrap();
 
     let tmd = std::fs::File::open(format!("{}/title.tmd", name))?;
     let mut reader = std::io::BufReader::new(tmd);
@@ -129,54 +173,20 @@ pub fn download_title(title_id: &str, name: &str, progress: &progress_dialog::Pr
         for byte in &u32_buf {
             id = (id << 8) | (*byte as u32);
         }
-        download_file(&Url::parse(&format!("{}/{:08x}", base_url, id)).unwrap(), &format!("{}/{:08x}.app", name, id), &progress).unwrap();
+        futures::executor::block_on(download_file(&format!("{}/{:08x}", base_url, id), &format!("{}/{:08x}.app", name, id), progress_bar, label)).unwrap();
         let mut has_hash_buffer = vec![0u8; 1];
         reader.seek(std::io::SeekFrom::Start((offset + 7).into()))?;
         reader.read_exact(&mut has_hash_buffer)?;
         let has_hash = (has_hash_buffer[0] & 0x2) == 2;
         if has_hash {
-            download_file( &Url::parse(&format!("{}/{:08x}.h3", base_url, id)).unwrap(), &format!("{}/{:08x}.h3", name, id), &progress).unwrap();
+            futures::executor::block_on(download_file(&format!("{}/{:08x}.h3", base_url, id), &format!("{}/{:08x}.h3", name, id), progress_bar, label)).unwrap();
         }
     }
 
     return Ok(());
 }
 
-fn update_progress(downloaded: u64, total: u64, progress: &Progress) {
-    progress.progress.set_fraction((downloaded / total) as f64);
-    progress.label.set_label(&format!("{:?}%", (downloaded / total) * 100));
-}
-
-const APP_ID: &str = "org.gtk_rs.HelloWorld2";
-
 #[tokio::main]
 async fn main() {
-    gtk::init().unwrap();
-    let progress = Progress {
-        progress: ProgressBar::new(),
-        label: Label::new(None),
-    };
-    progress.progress.set_text(Some("Downloading..."));
-    progress.label.set_text("0%");
-
-    let window = progress_dialog::progress_dialog(&progress);
-
-    let app = Application::builder().application_id(APP_ID).build();
-    app.connect_activate(move |app| {
-        app.add_window(&window);
-        window.show();
-    });
-
-    std::thread::spawn(move || {
-        match download_title("00050000101c9500", "BOTW EUR", &progress) {
-            Ok(_) => {
-                println!("Download completed successfully.");
-            }
-            Err(e) => {
-                println!("Error downloading file: {}", e);
-            }
-        }
-    });
-
-    app.run();
+    progress_dialog();
 }
