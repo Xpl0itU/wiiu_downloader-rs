@@ -57,17 +57,11 @@ pub fn generate_key(title_id: &str) -> String {
     }
     iv[8..].fill(0);
 
-    for b in iv.iter() {
-        println!("{:0x}", b);
-    }
-
     let encrypted_key = encrypt_aes(&mut key, &common_key, &iv);
 
     for b in encrypted_key.iter() {
         ret.push_str(&format!("{:02x}", b));
     }
-
-    println!("{}", ret);
 
     return ret;
 }
