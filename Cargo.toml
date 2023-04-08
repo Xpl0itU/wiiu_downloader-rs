@@ -16,6 +16,12 @@ openssl = "0.10.49"
 hex = "*"
 gtk = { version = "0.6.4", package = "gtk4", features = ["v4_8"] }
 futures = "0.3.28"
+libc = "0.2.141"
+
+[build-dependencies]
+bindgen = "0.64.0"
+reqwest = { version = "0.11.16", features = ["stream", "blocking"] }
+cc = { version = "1.0.79", features = ["parallel"] }
 
 [[bin]]
 name = "wiiu_downloader-rs"
