@@ -26,7 +26,11 @@ pub fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label: &
     let mut downloaded: u64 = 0;
     let mut writer = Cursor::new(Vec::new());
 
-    while !get_queue_cancelled() {
+    loop {
+        if get_queue_cancelled() { // Check if download was cancelled
+            break;
+        }
+
         let mut buffer = [0; 1024];
         let bytes_read = res.read(&mut buffer).unwrap();
 
@@ -55,7 +59,7 @@ pub fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label: &
 
     std::mem::drop(res);
     if get_queue_cancelled() {
-        std::fs::remove_file(path).or(Err(format!("Failed to remove file '{}'", path)))?;
+        std::fs::remove_file(path).unwrap_or_else(|e| eprintln!("Failed to remove file '{}': {}", path, e));
     } else {
         file.write_all(&writer.into_inner()).unwrap();
     }
@@ -110,13 +114,25 @@ pub fn download_title(title_id: &str, name: &str, progress_bar: &ProgressBar, la
             for byte in &u32_buf {
                 id = (id << 8) | (*byte as u32);
             }
-            download_file(&format!("{}/{:08x}", base_url, id), &format!("{}/{:08x}.app", name, id), progress_bar, label, cancel_button).unwrap();
+            match download_file(&format!("{}/{:08x}", base_url, id), &format!("{}/{:08x}.app", name, id), progress_bar, label, cancel_button) {
+                Ok(_) => println!("{}", format!("{}/{:08x}.app download ok", name, id)),
+                Err(e) =>  {
+                    println!("{}", format!("{}/{:08x}.app download error", name, id));
+                    return Err(e);
+                },
+            }
             let mut has_hash_buffer = vec![0u8; 1];
             reader.seek(std::io::SeekFrom::Start((offset + 7).into())).unwrap();
             reader.read_exact(&mut has_hash_buffer).unwrap();
             let has_hash = (has_hash_buffer[0] & 0x2) == 2;
             if has_hash {
-                download_file(&format!("{}/{:08x}.h3", base_url, id), &format!("{}/{:08x}.h3", name, id), progress_bar, label, cancel_button).unwrap();
+                match download_file(&format!("{}/{:08x}.h3", base_url, id), &format!("{}/{:08x}.h3", name, id), progress_bar, label, cancel_button) {
+                    Ok(_) => println!("{}", format!("{}/{:08x}.h3 download ok", name, id)),
+                    Err(e) =>  {
+                        println!("{}", format!("{}/{:08x}.h3 download error", name, id));
+                        return Err(e);
+                    },
+                }
             }
         }
     }

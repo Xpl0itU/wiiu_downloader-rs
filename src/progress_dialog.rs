@@ -36,7 +36,7 @@ pub fn progress_dialog() {
         button.connect_clicked(move |_| {
             cancel_button_clone.set_sensitive(true);
             download_title("00050000101c9500", "BOTW EUR", &progress_bar_clone, &label_clone, &cancel_button_clone).unwrap();
-            set_queue_cancelled(true);
+            set_queue_cancelled(false);
         });
         box_container.append(&button);
         box_container.append(&cancel_button);
