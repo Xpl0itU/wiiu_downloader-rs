@@ -2,15 +2,27 @@ mod keygen;
 
 use gtk::prelude::*;
 use gtk::{Application, ApplicationWindow, Box, Button, ProgressBar, Label, glib};
-use futures::StreamExt;
 
 use std::fs::File;
 
+use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
 use std::io::Write;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use keygen::generate_key;
+
+static QUEUE_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_queue_cancelled(value: bool) {
+    QUEUE_CANCELLED.store(value, Ordering::SeqCst);
+}
+
+pub fn get_queue_cancelled() -> bool {
+    return QUEUE_CANCELLED.load(Ordering::SeqCst);
+}
 
 fn path_exists(path: &str) -> bool {
     std::fs::metadata(path).is_ok()
@@ -84,12 +96,20 @@ fn progress_dialog() {
         let button = Button::builder()
             .label("Download")
             .build();
+        let cancel_button = Button::builder()
+            .label("Cancel")
+            .sensitive(false)
+            .build();
         let progress_bar_clone = progress_bar.clone();
         let label_clone = label.clone();
+        let cancel_button_clone = cancel_button.clone();
         button.connect_clicked(move |_| {
-            download_title("00050000101c9500", "BOTW EUR", &progress_bar_clone, &label_clone).unwrap();
+            cancel_button_clone.set_sensitive(true);
+            download_title("00050000101c9500", "BOTW EUR", &progress_bar_clone, &label_clone, &cancel_button_clone).unwrap();
+            set_queue_cancelled(true);
         });
         box_container.append(&button);
+        box_container.append(&cancel_button);
 
         window.set_child(Some(&box_container));
         window.show();
@@ -98,12 +118,11 @@ fn progress_dialog() {
     app.run();
 }
 
-async fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label: &Label) -> Result<(), String> {
+fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label: &Label, cancel_button: &Button) -> Result<(), String> {
     // Reqwest setup
-    let res = reqwest::Client::new()
+    let mut res = reqwest::blocking::Client::new()
         .get(url)
         .send()
-        .await
         .or(Err(format!("Failed to GET from '{}'", &url)))?;
     let total_size = res
         .content_length()
@@ -112,11 +131,17 @@ async fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label:
     // download chunks
     let mut file = std::fs::File::create(path).or(Err(format!("Failed to create file '{}'", path)))?;
     let mut downloaded: u64 = 0;
-    let mut stream = res.bytes_stream();
+    let mut writer = Cursor::new(Vec::new());
 
-    while let Some(item) = stream.next().await {
-        let chunk = item.or(Err(format!("Error while downloading file")))?;
-        downloaded += chunk.len() as u64;
+    loop {
+        let mut buffer = [0; 1024];
+        let bytes_read = res.read(&mut buffer).unwrap();
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        downloaded += bytes_read as u64;
         let progress = downloaded as f64 / total_size as f64;
         progress_bar.set_fraction(progress);
 
@@ -126,35 +151,49 @@ async fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label:
         while glib::MainContext::pending(&glib::MainContext::default()) {
             glib::MainContext::iteration(&glib::MainContext::default(), true);
         }
-        file.write_all(&chunk)
-            .or(Err(format!("Error while writing to file")))?;
+
+        writer.write_all(&buffer[..bytes_read]).unwrap();
+
+        cancel_button.connect_clicked(move |c_button| {
+            std::mem::drop(bytes_read);
+            set_queue_cancelled(true);
+            c_button.set_sensitive(false);
+        });
     }
+
+    file.write_all(&writer.into_inner()).unwrap();
 
     return Ok(());
 }
 
-pub fn download_title(title_id: &str, name: &str, progress_bar: &ProgressBar, label: &Label) -> std::io::Result<()> {
+pub fn download_title(title_id: &str, name: &str, progress_bar: &ProgressBar, label: &Label, cancel_button: &Button) -> Result<(), String> {
     if !path_exists(name) {
         std::fs::create_dir(name).unwrap();
     }
 
     let base_url = format!("http://ccs.cdn.c.shop.nintendowifi.net/ccs/download/{}", title_id);
 
-    futures::executor::block_on(download_file(&format!("{}/{}", base_url, "tmd"), &format!("{}/title.tmd", name), progress_bar, label)).unwrap();
+    match download_file(&format!("{}/{}", base_url, "tmd"), &format!("{}/title.tmd", name), progress_bar, label, cancel_button) {
+        Ok(_) => println!("TMD Download ok"),
+        Err(e) =>  {
+            println!("TMD Download error");
+            return Err(e);
+        },
+    }
 
-    let tmd = std::fs::File::open(format!("{}/title.tmd", name))?;
+    let tmd = std::fs::File::open(format!("{}/title.tmd", name)).unwrap();
     let mut reader = std::io::BufReader::new(tmd);
     let mut u16_buf = vec![0u8; 2];
-    reader.seek(std::io::SeekFrom::Start(478))?;
-    reader.read_exact(&mut u16_buf)?;
+    reader.seek(std::io::SeekFrom::Start(478)).unwrap();
+    reader.read_exact(&mut u16_buf).unwrap();
 
     let mut content_count: u16 = 0;
     for byte in &u16_buf {
         content_count = (content_count << 8) | (*byte as u16);
     }
 
-    reader.seek(std::io::SeekFrom::Start(476))?;
-    reader.read_exact(&mut u16_buf)?;
+    reader.seek(std::io::SeekFrom::Start(476)).unwrap();
+    reader.read_exact(&mut u16_buf).unwrap();
 
     let mut title_version: u16 = 0;
     for byte in &u16_buf {
@@ -166,27 +205,28 @@ pub fn download_title(title_id: &str, name: &str, progress_bar: &ProgressBar, la
     let mut u32_buf = vec![0u8; 4];
 
     for content in 0..content_count {
-        let offset = 2820 + (48 * content);
-        reader.seek(std::io::SeekFrom::Start(offset.into()))?;
-        reader.read_exact(&mut u32_buf)?;
-        let mut id: u32 = 0;
-        for byte in &u32_buf {
-            id = (id << 8) | (*byte as u32);
-        }
-        futures::executor::block_on(download_file(&format!("{}/{:08x}", base_url, id), &format!("{}/{:08x}.app", name, id), progress_bar, label)).unwrap();
-        let mut has_hash_buffer = vec![0u8; 1];
-        reader.seek(std::io::SeekFrom::Start((offset + 7).into()))?;
-        reader.read_exact(&mut has_hash_buffer)?;
-        let has_hash = (has_hash_buffer[0] & 0x2) == 2;
-        if has_hash {
-            futures::executor::block_on(download_file(&format!("{}/{:08x}.h3", base_url, id), &format!("{}/{:08x}.h3", name, id), progress_bar, label)).unwrap();
+        if !get_queue_cancelled() {
+            let offset = 2820 + (48 * content);
+            reader.seek(std::io::SeekFrom::Start(offset.into())).unwrap();
+            reader.read_exact(&mut u32_buf).unwrap();
+            let mut id: u32 = 0;
+            for byte in &u32_buf {
+                id = (id << 8) | (*byte as u32);
+            }
+            download_file(&format!("{}/{:08x}", base_url, id), &format!("{}/{:08x}.app", name, id), progress_bar, label, cancel_button).unwrap();
+            let mut has_hash_buffer = vec![0u8; 1];
+            reader.seek(std::io::SeekFrom::Start((offset + 7).into())).unwrap();
+            reader.read_exact(&mut has_hash_buffer).unwrap();
+            let has_hash = (has_hash_buffer[0] & 0x2) == 2;
+            if has_hash {
+                download_file(&format!("{}/{:08x}.h3", base_url, id), &format!("{}/{:08x}.h3", name, id), progress_bar, label, cancel_button).unwrap();
+            }
         }
     }
 
     return Ok(());
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     progress_dialog();
 }
