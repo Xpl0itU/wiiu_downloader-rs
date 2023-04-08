@@ -26,7 +26,7 @@ pub fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label: &
     let mut downloaded: u64 = 0;
     let mut writer = Cursor::new(Vec::new());
 
-    loop {
+    while !get_queue_cancelled() {
         let mut buffer = [0; 1024];
         let bytes_read = res.read(&mut buffer).unwrap();
 
@@ -48,15 +48,19 @@ pub fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label: &
         writer.write_all(&buffer[..bytes_read]).unwrap();
 
         cancel_button.connect_clicked(move |c_button| {
-            std::mem::drop(bytes_read);
             set_queue_cancelled(true);
             c_button.set_sensitive(false);
         });
     }
 
-    file.write_all(&writer.into_inner()).unwrap();
+    std::mem::drop(res);
+    if get_queue_cancelled() {
+        std::fs::remove_file(path).or(Err(format!("Failed to remove file '{}'", path)))?;
+    } else {
+        file.write_all(&writer.into_inner()).unwrap();
+    }
 
-    return Ok(());
+    Ok(())
 }
 
 pub fn download_title(title_id: &str, name: &str, progress_bar: &ProgressBar, label: &Label, cancel_button: &Button) -> Result<(), String> {
