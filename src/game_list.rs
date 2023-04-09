@@ -1,11 +1,12 @@
 use wiiu_downloader_rs::{getTitleEntriesSize, getFormattedKind, getFormattedRegion, TITLE_CATEGORY_TITLE_CATEGORY_ALL};
-use gtk::prelude::*;
-use gtk::{gio, Application};
+use gtk::{prelude::*, gio, Application, glib::BoxedAnyObject};
 
 
+use crate::downloader::download_title;
 use crate::grid_cell::Entry;
 use crate::grid_cell::GridCell;
-use gtk::glib::BoxedAnyObject;
+use crate::progress_dialog::progress_dialog;
+use crate::queue::set_queue_cancelled;
 
 use std::cell::Ref;
 
@@ -41,9 +42,13 @@ pub fn game_list(app: &Application, game_titles: *const TitleEntry) {
 
         let region: &CStr = unsafe { CStr::from_ptr(getFormattedRegion((*game_titles.offset(i.try_into().unwrap())).region)) };
         let region_str: &str = region.to_str().unwrap();
+
+        let title_id: u64 = unsafe { (*game_titles.offset(i.try_into().unwrap())).tid };
+        let title_id_str: String = format!("{:016x}", title_id);
+
         store.append(&BoxedAnyObject::new(Row {
             in_queue: false,
-            title_id: "PLACEHOLDER".to_string(),
+            title_id: title_id_str,
             kind: kind_str.to_string(),
             region: region_str.to_string(),
             name: game_name_str.to_string(),
@@ -148,14 +153,36 @@ pub fn game_list(app: &Application, game_titles: *const TitleEntry) {
     let region_col = gtk::ColumnViewColumn::new(Some("Region"), Some(region_col_factory));
     let name_col = gtk::ColumnViewColumn::new(Some("Name"), Some(name_col_factory));
 
+    name_col.set_expand(true);
+
     column_view.set_hexpand(true);
     column_view.set_vexpand(true);
+
     column_view.append_column(&in_queue_col);
     column_view.append_column(&title_id_col);
     column_view.append_column(&kind_col);
     column_view.append_column(&region_col);
     column_view.append_column(&name_col);
+    column_view.connect_activate(move |view: &gtk::ColumnView, pos| {
+        if let Some(_item) = view.model().as_ref()
+            .and_then(|model| model.item(pos))
+        {
+            let game_name: &CStr = unsafe { CStr::from_ptr((*game_titles.offset(pos.try_into().unwrap())).name) };
+            let game_name_str: &str = game_name.to_str().unwrap();
+            println!("game name: {}", game_name_str);
 
+            let title_id: u64 = unsafe { (*game_titles.offset(pos.try_into().unwrap())).tid };
+            let title_id_str: String = format!("{:016x}", title_id);
+
+            let (progress_window, progress_bar, label, cancel_button) = progress_dialog();
+            cancel_button.set_sensitive(true);
+            set_queue_cancelled(false);
+            download_title(&title_id_str, game_name_str, &progress_bar, &label, &cancel_button).unwrap();
+            progress_window.close();
+            progress_window.destroy();
+            set_queue_cancelled(false);
+        }
+    });    
     let scrolled_window = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never) // Disable horizontal scrolling
         .hexpand(true)

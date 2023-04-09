@@ -17,6 +17,7 @@ pub fn download_file(url: &str, path: &str, progress_bar: &ProgressBar, label: &
         .get(url)
         .send()
         .or(Err(format!("Failed to GET from '{}'", &url)))?;
+    println!("url: {}", url);
     let total_size = res
         .content_length()
         .ok_or(format!("Failed to get content length from '{}'", &url))?;
